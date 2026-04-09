@@ -1,0 +1,18 @@
+# Environment
+.env
+__pycache__/
+*.pyc
+
+# Outputs (regenerated at runtime)
+output/
+logs/
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Claude
+.claude/
