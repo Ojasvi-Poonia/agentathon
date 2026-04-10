@@ -1,0 +1,16 @@
+Agentathon Output Format
+
+Participants must submit a plain text file named team-name.txt with exactly this structure:
+
+Q1: [your answer]
+Q2: [your answer]
+Q3: [your answer]
+Q4: [your answer]
+Q5: [your answer]
+
+Rules:
+- Keep the labels in the same order.
+- Do not add markdown, code blocks, tables, or extra commentary.
+- Q1, Q2, and Q4 should contain ranked labeled lines.
+- Q3 should contain the five required counts.
+- Q5 should be exactly 3 sentences.

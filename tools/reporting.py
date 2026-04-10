@@ -109,10 +109,20 @@ def generate_chart(chart_type: str, x_col: str, y_col: str, title: str = "") -> 
         return json.dumps({"error": str(e)})
 
 
-def compile_report(output_format: str = "text") -> str:
+def compile_report(output_format: str = "text",
+                   output_path: str = "") -> str:
     """
-    Compile results into STRICT Q1-Q5 submission format.
-    The scorer parses sections in order Q1 -> Q5.
+    Compile results into STRICT single-line Q1-Q5 submission format
+    matching the official output_format.txt template:
+
+        Q1: [ranked labeled values]
+        Q2: [ranked labeled values]
+        Q3: [five required counts]
+        Q4: [ranked labeled values]
+        Q5: [exactly 3 sentences]
+
+    Each Q section is a single line.  Labeled values within a section
+    are comma-separated.  No markdown, no currency symbols.
     """
     log.info("Compiling strict Q1-Q5 report")
     try:
@@ -123,58 +133,51 @@ def compile_report(output_format: str = "text") -> str:
 
         lines = []
 
-        # ── Q1: Category: ₹Value ───
-        lines.append("Q1:")
+        # Q1: comma-separated ranked labels
         if q1 and isinstance(q1, dict):
-            for k, v in q1.items():
-                lines.append(f"{k}: \u20b9{v}")
+            q1_parts = [f"{k}: {v}" for k, v in q1.items()]
+            lines.append(f"Q1: {', '.join(q1_parts)}")
         else:
-            lines.append("No data")
+            lines.append("Q1: No data")
 
-        # ── Q2: Region: Value days ──
-        lines.append("")
-        lines.append("Q2:")
+        # Q2: comma-separated ranked labels with "days" suffix
         if q2 and isinstance(q2, dict):
-            for k, v in q2.items():
-                lines.append(f"{k}: {v} days")
+            q2_parts = [f"{k}: {v} days" for k, v in q2.items()]
+            lines.append(f"Q2: {', '.join(q2_parts)}")
         else:
-            lines.append("No data")
+            lines.append("Q2: No data")
 
-        # ── Q3: exact 5 counts ──────
-        lines.append("")
-        lines.append("Q3:")
+        # Q3: five required counts
         if q3 and isinstance(q3, dict):
-            lines.append(f"Duplicate order IDs: {q3.get('duplicate_order_ids', 0)}")
-            lines.append(f"Quantity outliers: {q3.get('quantity_outliers', 0)}")
-            lines.append(f"Price format errors: {q3.get('price_format_errors', 0)}")
-            lines.append(f"Invalid discounts: {q3.get('invalid_discounts', 0)}")
-            lines.append(f"Total null cells: {q3.get('total_null_cells', 0)}")
+            q3_parts = [
+                f"Duplicate order IDs: {q3.get('duplicate_order_ids', 0)}",
+                f"Quantity outliers: {q3.get('quantity_outliers', 0)}",
+                f"Price format errors: {q3.get('price_format_errors', 0)}",
+                f"Invalid discounts: {q3.get('invalid_discounts', 0)}",
+                f"Total null cells: {q3.get('total_null_cells', 0)}",
+            ]
+            lines.append(f"Q3: {', '.join(q3_parts)}")
         else:
-            lines.append("No data")
+            lines.append("Q3: No data")
 
-        # ── Q4: Method: Value% ──────
-        lines.append("")
-        lines.append("Q4:")
+        # Q4: comma-separated ranked labels with "%" suffix
         if q4 and isinstance(q4, dict):
-            for k, v in q4.items():
-                lines.append(f"{k}: {v}%")
+            q4_parts = [f"{k}: {v}%" for k, v in q4.items()]
+            lines.append(f"Q4: {', '.join(q4_parts)}")
         else:
-            lines.append("No data")
+            lines.append("Q4: No data")
 
-        # ── Q5: executive summary ───
-        lines.append("")
-        lines.append("Q5:")
-        q5 = state.get_result("q5")
-        if q5:
-            lines.append(q5)
-        else:
-            q5_text = _generate_q5()
-            lines.append(q5_text)
+        # Q5: exactly 3 sentences
+        q5 = state.get_result("q5") or _generate_q5()
+        lines.append(f"Q5: {q5}")
 
         report = "\n".join(lines)
 
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        out_path = f"{OUTPUT_DIR}/submission.txt"
+        out_path = output_path or f"{OUTPUT_DIR}/submission.txt"
+        out_dir = os.path.dirname(out_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(report)
 

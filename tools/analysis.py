@@ -426,7 +426,7 @@ def q3_data_quality(order_id_col: str, quantity_col: str,
     """
     Q3: Exact 5 data-quality counts on the ORIGINAL (uncleaned) data.
       1. Duplicate order IDs
-      2. Quantity outliers (IQR 1.5x)
+      2. Quantity outliers (> 1000 per problem statement)
       3. Price format errors (null + non-numeric + negative)
       4. Invalid discounts (null + non-numeric + outside [0,100])
       5. Total null cells (entire dataset)
@@ -440,12 +440,9 @@ def q3_data_quality(order_id_col: str, quantity_col: str,
         # 1. Duplicate order IDs
         dup_ids = int(df[order_id_col].duplicated().sum())
 
-        # 2. Quantity outliers (IQR)
+        # 2. Quantity outliers: values strictly greater than 1000
         qty = pd.to_numeric(df[quantity_col], errors="coerce")
-        q1_val = qty.quantile(0.25)
-        q3_val = qty.quantile(0.75)
-        iqr = q3_val - q1_val
-        qty_outliers = int(((qty < q1_val - 1.5 * iqr) | (qty > q3_val + 1.5 * iqr)).sum())
+        qty_outliers = int((qty > 1000).sum())
 
         # 3. Price format errors (null + non-numeric + negative)
         price_num = pd.to_numeric(df[price_col], errors="coerce")
@@ -482,13 +479,17 @@ def q4_return_rate_by_payment(payment_col: str, return_col: str) -> str:
         if err:
             return err
 
-        # flexible return-flag parsing
+        # flexible return-flag parsing: handles numeric, boolean,
+        # and string forms including "Returned"/"Not Returned"/"Pending"
         ret = pd.to_numeric(df[return_col], errors="coerce")
         if ret.isna().sum() > len(ret) * 0.5:
             ret = df[return_col].map({
-                True: 1, False: 0, "Yes": 1, "No": 0,
-                "yes": 1, "no": 0, "TRUE": 1, "FALSE": 0,
-                "1": 1, "0": 0, 1: 1, 0: 0,
+                True: 1, False: 0,
+                "Yes": 1, "No": 0, "yes": 1, "no": 0,
+                "TRUE": 1, "FALSE": 0, "1": 1, "0": 0, 1: 1, 0: 0,
+                "Returned": 1, "returned": 1, "RETURNED": 1,
+                "Not Returned": 0, "not returned": 0, "NOT RETURNED": 0,
+                "Pending": 0, "pending": 0, "PENDING": 0,
             })
         working = df.assign(_ret=ret).dropna(subset=["_ret"])
         rates = (working.groupby(payment_col)["_ret"].mean() * 100).sort_values(ascending=False)

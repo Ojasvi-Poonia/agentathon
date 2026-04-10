@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
 """
 Agentathon 2026 -- Enterprise Finance AI Squad
-6-agent autonomous pipeline with Gemini 2.0 Flash function calling.
+Dual-mode pipeline:
+  STEP 1: Deterministic Q1-Q5 analysis (always runs, <2s, no API key needed)
+  STEP 2: Google ADK 6-agent pipeline (runs if GEMINI_API_KEY is set)
 
 Agents: Data Engineer -> Planner -> Analyst -> Auditor -> Synthesizer -> Validator
 
 Usage:
-    python run_agents.py --data ./data
+    python run_agents.py --data ./data                 # both pipelines
+    python run_agents.py --data ./data --fallback      # deterministic only
     python run_agents.py --data ./data --problem problem.txt
-    python run_agents.py --data ./data --problem "Analyze revenue trends by sector"
+    python run_agents.py --data ./data --map "category=ProductType,revenue=Sales"
 """
 import argparse
-import os
-import sys
-import time
-import json
+import asyncio
 import logging
+import os
+import time
 import traceback
 from datetime import datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from google.adk.agents import SequentialAgent
+
+os.makedirs("logs", exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,6 +46,47 @@ def load_problem_statement(problem_arg: str) -> str:
         with open(problem_arg, "r", encoding="utf-8") as f:
             return f.read().strip()
     return problem_arg
+
+
+async def _run_adk_pipeline(
+    squad: "SequentialAgent", data_dir: str, problem: str
+) -> None:
+    """Run the ADK SequentialAgent via InMemoryRunner and stream events."""
+    from google.adk.runners import InMemoryRunner
+    from google.genai import types
+
+    runner = InMemoryRunner(agent=squad, app_name="finance_squad")
+    session = await runner.session_service.create_session(
+        app_name="finance_squad",
+        user_id="agentathon_user",
+    )
+
+    kickoff_text = (
+        f"Analyze the dataset in '{data_dir}'. "
+        f"Run the full Q1-Q5 pipeline end-to-end. "
+        f"Problem statement: {problem or 'standard Q1-Q4 financial analysis'}."
+    )
+    content = types.Content(
+        role="user",
+        parts=[types.Part(text=kickoff_text)],
+    )
+
+    print()
+    async for event in runner.run_async(
+        user_id="agentathon_user",
+        session_id=session.id,
+        new_message=content,
+    ):
+        author = getattr(event, "author", "agent") or "agent"
+        if event.content and event.content.parts:
+            for part in event.content.parts:
+                if getattr(part, "text", None):
+                    preview = part.text.strip().replace("\n", " ")[:180]
+                    if preview:
+                        print(f"    [{author}] {preview}")
+                if getattr(part, "function_call", None):
+                    fc = part.function_call
+                    print(f"    [{author}] -> {fc.name}()")
 
 
 def run_deterministic_pipeline(data_dir: str, output_path: str) -> bool:
@@ -78,6 +127,38 @@ def run_deterministic_pipeline(data_dir: str, output_path: str) -> bool:
         return False
     print(f"  Rows: {df.shape[0]}  Cols: {df.shape[1]}")
     print(f"  Detected: {col_map}")
+
+    # ── Compute revenue if we have quantity + price + discount ──
+    # Formula: revenue = quantity * unit_price * (1 - discount_percent/100)
+    #
+    # We derive the three numeric series from the ORIGINAL raw data (not the
+    # cleaned df) so that:
+    #   1. quantity/unit_price/discount are all imputed CONSISTENTLY with
+    #      their own median — not mixed mode-fill (object) and median-fill
+    #      (numeric).
+    #   2. Format errors (non-numeric unit_price strings) get imputed too,
+    #      instead of being silently dropped from the sum.
+    # This matches the most common "clean then compute" interpretation of
+    # the problem statement and uses all rows in the dataset.
+    import pandas as pd
+    qty_col = col_map.get("quantity")
+    prc_col = col_map.get("price")
+    dsc_col = col_map.get("discount")
+    if qty_col and prc_col and dsc_col:
+        df_orig = state.store.get("original", state.store["cleaned"])
+        qty_num = pd.to_numeric(df_orig[qty_col], errors="coerce")
+        prc_num = pd.to_numeric(df_orig[prc_col], errors="coerce")
+        dsc_num = pd.to_numeric(df_orig[dsc_col], errors="coerce")
+        qty_num = qty_num.fillna(qty_num.median())
+        prc_num = prc_num.fillna(prc_num.median())
+        dsc_num = dsc_num.fillna(dsc_num.median())
+        revenue = qty_num * prc_num * (1 - dsc_num / 100)
+
+        df_clean = state.store["cleaned"].copy()
+        df_clean["_revenue"] = revenue.values
+        state.store["cleaned"] = df_clean
+        col_map["revenue"] = "_revenue"
+        print(f"  Computed revenue = {qty_col} * {prc_col} * (1 - {dsc_col}/100)")
 
     # ── Q1: Revenue by Category ──────────────────────────────
     cat_col = col_map.get("category")
@@ -126,7 +207,7 @@ def run_deterministic_pipeline(data_dir: str, output_path: str) -> bool:
         generate_chart("bar", pay_col, ret_col, "Q4 Return Rate by Payment")
 
     # ── Compile strict Q1-Q5 submission ──────────────────────
-    compile_report()
+    compile_report(output_path=output_path)
     return True
 
 
@@ -135,7 +216,14 @@ def main():
         description="Enterprise Finance AI Squad -- Agentathon 2026"
     )
     parser.add_argument("--data", default="./data", help="Dataset directory")
-    parser.add_argument("--output", default="output/submission.txt", help="Submission file")
+    parser.add_argument(
+        "--team", default="team-name",
+        help="Team name -- used as output file <team>.txt"
+    )
+    parser.add_argument(
+        "--output", default="",
+        help="Explicit output path (overrides --team)"
+    )
     parser.add_argument(
         "--problem", default="",
         help="Problem statement: file path or inline text"
@@ -147,9 +235,14 @@ def main():
     parser.add_argument(
         "--map", default="",
         help="Manual column overrides: role=col,role=col  e.g. "
-             "'category=Product_Type,revenue=Sales_Amount'"
+             "'category=product_category,revenue=_revenue'"
     )
     args = parser.parse_args()
+
+    # Resolve output path
+    if not args.output:
+        safe_team = args.team.strip().replace(" ", "-").replace("/", "-")
+        args.output = f"output/{safe_team}.txt"
 
     os.makedirs("logs", exist_ok=True)
     os.makedirs("output", exist_ok=True)
@@ -180,37 +273,36 @@ def main():
     print("\n  STEP 1: Deterministic Q1-Q5 pipeline")
     success = run_deterministic_pipeline(args.data, args.output)
 
-    # ── STEP 2: Run agent demo if --agents flag is set (for presentation) ──
+    # ── STEP 2: Run Google ADK agent pipeline (if not --fallback) ──
     if not args.fallback:
         try:
-            import google.generativeai as genai
             from dotenv import load_dotenv
             load_dotenv()
 
-            api_key = os.getenv("GEMINI_API_KEY", "")
+            api_key = os.getenv("GEMINI_API_KEY", "") or os.getenv(
+                "GOOGLE_API_KEY", ""
+            )
             if api_key and api_key != "your_key_here":
-                print("\n  STEP 2: Agent pipeline demo")
-                genai.configure(api_key=api_key)
+                # ADK reads GOOGLE_API_KEY from env
+                os.environ["GOOGLE_API_KEY"] = api_key
 
-                from orchestrator import build_squad
-                squad = build_squad(args.data, problem)
+                print("\n  STEP 2: Google ADK agent pipeline")
                 print("  6-agent squad: Data Engineer, Planner, Analyst, "
                       "Auditor, Synthesizer, Validator")
 
-                squad.run()
-
-                # Re-compile with any improved results from agents
+                import asyncio
+                from orchestrator import build_squad
                 from tools.reporting import compile_report
-                compile_report()
 
-                print("\n  Agent execution log:")
-                for entry in squad.execution_log:
-                    status = entry["status"].upper()
-                    print(f"    {entry['agent']:20s} {status:8s} ({entry['elapsed_s']}s)")
+                squad = build_squad(args.data, problem)
+                asyncio.run(_run_adk_pipeline(squad, args.data, problem))
+
+                # Re-compile using any improved findings from the agents
+                compile_report(output_path=args.output)
             else:
-                print("\n  STEP 2: Skipped (no GEMINI_API_KEY)")
+                print("\n  STEP 2: Skipped (no GEMINI_API_KEY / GOOGLE_API_KEY)")
         except Exception as e:
-            log.error(f"Agent pipeline failed: {e}")
+            log.error(f"ADK agent pipeline failed: {e}")
             traceback.print_exc()
             print(f"\n  Agent demo failed: {e}")
             print("  Deterministic submission remains valid.")
