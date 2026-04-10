@@ -3,17 +3,43 @@ Configuration and column signature definitions for the Finance AI Squad.
 Expanded to handle generic datasets + enterprise finance data.
 """
 
-GEMINI_MODEL = "gemini-2.0-flash"
-MAX_AGENT_TURNS = 15
-TEMPERATURE = 0.05
+# ── Gemini model selection ────────────────────────────────────
+# Primary model used by every agent. Override at runtime with
+# the --model CLI flag or by setting GEMINI_MODEL in the environment.
+#
+# The fallback chain is tried in order when the primary returns a
+# transient 503 (UNAVAILABLE) or 429 (RESOURCE_EXHAUSTED) error.
+# The list is ordered from highest-capability/most-likely-loaded to
+# most-available-as-a-safety-net.
+GEMINI_MODEL: str = "gemini-flash-lite-latest"
+
+# Ordered from "least loaded / most likely to work" to "most loaded".
+# Verified against generativelanguage.googleapis.com v1beta; 1.5-series
+# models have been retired from v1beta and removed from this chain.
+GEMINI_FALLBACK_MODELS: tuple[str, ...] = (
+    "gemini-flash-lite-latest",
+    "gemini-2.5-flash-lite",
+    "gemini-flash-latest",
+    "gemini-2.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
+)
+
+# Retry settings for transient Gemini errors (503 / 429).
+MAX_LLM_RETRIES: int = 3
+LLM_RETRY_BASE_DELAY_SECONDS: float = 2.0
+
+# Agent execution
+MAX_AGENT_TURNS: int = 15
+TEMPERATURE: float = 0.05
 
 # Weights for fuzzy column matching
-W_NAME = 0.50
-W_TYPE = 0.25
-W_STATS = 0.25
+W_NAME: float = 0.50
+W_TYPE: float = 0.25
+W_STATS: float = 0.25
 
 # Minimum confidence to accept a column mapping
-MIN_CONFIDENCE = 0.20
+MIN_CONFIDENCE: float = 0.20
 
 ROLE_SIGNATURES = {
     # ── Identifiers ──────────────────────────────────────────

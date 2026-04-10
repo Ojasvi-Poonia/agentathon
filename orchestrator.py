@@ -15,6 +15,7 @@ Execution happens through `InMemoryRunner.run_async()`.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from google.adk.agents import LlmAgent, SequentialAgent
@@ -46,10 +47,10 @@ log = logging.getLogger("Orchestrator")
 # ═══════════════════════════════════════════════════════════════
 
 
-def _build_data_engineer(data_dir: str) -> LlmAgent:
+def _build_data_engineer(data_dir: str, model: str) -> LlmAgent:
     return LlmAgent(
         name="data_engineer",
-        model=GEMINI_MODEL,
+        model=model,
         description="Discovers, loads, profiles, and cleans data files.",
         instruction=(
             "You are a data engineering agent. Your job is to prepare the "
@@ -72,7 +73,7 @@ def _build_data_engineer(data_dir: str) -> LlmAgent:
     )
 
 
-def _build_planner(problem_statement: str) -> LlmAgent:
+def _build_planner(problem_statement: str, model: str) -> LlmAgent:
     problem_block = (
         f"\n\nPROBLEM STATEMENT FROM ORGANIZERS:\n{problem_statement}\n"
         if problem_statement
@@ -80,7 +81,7 @@ def _build_planner(problem_statement: str) -> LlmAgent:
     )
     return LlmAgent(
         name="planner",
-        model=GEMINI_MODEL,
+        model=model,
         description=(
             "Creates an analysis plan from the data profile and "
             "problem statement."
@@ -110,10 +111,10 @@ def _build_planner(problem_statement: str) -> LlmAgent:
     )
 
 
-def _build_analyst() -> LlmAgent:
+def _build_analyst(model: str) -> LlmAgent:
     return LlmAgent(
         name="analyst",
-        model=GEMINI_MODEL,
+        model=model,
         description="Executes the analysis plan using analysis tools.",
         instruction=(
             "You are a financial analyst. Execute the analysis plan produced "
@@ -148,10 +149,10 @@ def _build_analyst() -> LlmAgent:
     )
 
 
-def _build_auditor() -> LlmAgent:
+def _build_auditor(model: str) -> LlmAgent:
     return LlmAgent(
         name="auditor",
-        model=GEMINI_MODEL,
+        model=model,
         description="Runs the Q3 data quality audit.",
         instruction=(
             "You are a data quality auditor. Based on the data profile:\n"
@@ -172,10 +173,10 @@ def _build_auditor() -> LlmAgent:
     )
 
 
-def _build_synthesizer() -> LlmAgent:
+def _build_synthesizer(model: str) -> LlmAgent:
     return LlmAgent(
         name="synthesizer",
-        model=GEMINI_MODEL,
+        model=model,
         description="Generates charts and compiles the final submission.",
         instruction=(
             "You are a report synthesizer. Your inputs:\n"
@@ -196,10 +197,10 @@ def _build_synthesizer() -> LlmAgent:
     )
 
 
-def _build_validator() -> LlmAgent:
+def _build_validator(model: str) -> LlmAgent:
     return LlmAgent(
         name="validator",
-        model=GEMINI_MODEL,
+        model=model,
         description="Reviews the final submission for completeness.",
         instruction=(
             "You are a validation agent. Review the report summary:\n"
@@ -222,19 +223,69 @@ def _build_validator() -> LlmAgent:
 # ═══════════════════════════════════════════════════════════════
 
 
+_DEPRECATED_MODEL_PREFIXES: tuple[str, ...] = (
+    "gemini-1.0",
+    "gemini-1.5",
+    "gemini-pro-vision",
+)
+
+
+def _is_deprecated(name: str) -> bool:
+    n = name.strip().lower().removeprefix("models/")
+    return any(n.startswith(p) for p in _DEPRECATED_MODEL_PREFIXES)
+
+
+def _resolve_model(model: Optional[str] = None) -> str:
+    """Pick the Gemini model for agents.
+
+    Precedence:
+      1. Explicit ``model`` argument (unless deprecated).
+      2. ``GEMINI_MODEL`` environment variable (unless deprecated).
+      3. ``GEMINI_MODEL`` constant from :mod:`config`.
+
+    Deprecated 1.x model names are rejected and logged — they have been
+    removed from the v1beta generative language API and will 404.
+    """
+    if model:
+        if _is_deprecated(model):
+            log.warning(
+                "Ignoring deprecated model override %r; falling back to %s",
+                model, GEMINI_MODEL,
+            )
+        else:
+            return model
+    env_model = os.environ.get("GEMINI_MODEL", "").strip()
+    if env_model:
+        if _is_deprecated(env_model):
+            log.warning(
+                "Ignoring deprecated GEMINI_MODEL=%r from environment; "
+                "falling back to %s",
+                env_model, GEMINI_MODEL,
+            )
+        else:
+            return env_model
+    return GEMINI_MODEL
+
+
 def build_squad(
-    data_dir: str, problem_statement: Optional[str] = None
+    data_dir: str,
+    problem_statement: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> SequentialAgent:
     """Build the 6-agent sequential pipeline using Google ADK.
 
     Args:
         data_dir: Directory containing the dataset files.
         problem_statement: Optional free-text problem statement.
+        model: Optional Gemini model override. Falls back to the
+            ``GEMINI_MODEL`` env var, then :data:`config.GEMINI_MODEL`.
 
     Returns:
-        A `SequentialAgent` ready to be handed to an ADK `Runner`.
+        A :class:`SequentialAgent` ready to be handed to an ADK ``Runner``.
     """
     problem = (problem_statement or "").strip()
+    chosen_model = _resolve_model(model)
+    log.info("Building squad with model=%s", chosen_model)
 
     squad = SequentialAgent(
         name="finance_squad",
@@ -243,13 +294,12 @@ def build_squad(
             "visualizes, and validates any dataset -- built for Agentathon 2026."
         ),
         sub_agents=[
-            _build_data_engineer(data_dir),
-            _build_planner(problem),
-            _build_analyst(),
-            _build_auditor(),
-            _build_synthesizer(),
-            _build_validator(),
+            _build_data_engineer(data_dir, chosen_model),
+            _build_planner(problem, chosen_model),
+            _build_analyst(chosen_model),
+            _build_auditor(chosen_model),
+            _build_synthesizer(chosen_model),
+            _build_validator(chosen_model),
         ],
     )
-    log.info("Built 6-agent ADK squad")
     return squad

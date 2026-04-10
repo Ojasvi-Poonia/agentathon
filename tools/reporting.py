@@ -26,6 +26,93 @@ plt.rcParams.update({
 OUTPUT_DIR = "output"
 
 
+def chart_from_results(
+    question_key: str,
+    title: str,
+    ylabel: str = "Value",
+    value_fmt: str = "{:.2f}",
+    orientation: str = "bar",
+) -> str:
+    """
+    Generate a bar chart directly from an already-computed Q1-Q4 result.
+
+    This bypasses the generic pandas-based chart path and reads the ranked
+    dict from state.results[question_key], so charts work correctly even
+    when the source data is non-numeric (e.g. string return_status).
+
+    Args:
+        question_key: key in state.results (e.g. "q1", "q2", "q4").
+        title:        chart title shown at the top.
+        ylabel:       y-axis label (or x-axis label for "barh").
+        value_fmt:    format string for bar annotations, e.g. "{:,.0f}" or "{:.2f}%".
+        orientation:  "bar" for vertical, "barh" for horizontal.
+    """
+    log.info(f"Chart from results: {question_key}")
+    try:
+        results = state.get_result(question_key)
+        if not results or not isinstance(results, dict):
+            return json.dumps(
+                {"error": f"No results found for {question_key}"}
+            )
+
+        labels = [str(k) for k in results.keys()]
+        values = [float(v) for v in results.values()]
+
+        if not values:
+            return json.dumps({"error": f"Empty results for {question_key}"})
+
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        safe_title = title.replace(" ", "_").replace("/", "-")[:60]
+        path = f"{OUTPUT_DIR}/{safe_title}.png"
+
+        fig, ax = plt.subplots()
+        colors = sns.color_palette("viridis", len(labels))
+
+        if orientation == "barh":
+            # Reverse for barh so largest appears on top
+            labels_plot = labels[::-1]
+            values_plot = values[::-1]
+            colors_plot = list(colors)[::-1]
+            bars = ax.barh(
+                labels_plot, values_plot,
+                color=colors_plot, edgecolor="white", linewidth=0.5,
+            )
+            ax.set_xlabel(ylabel)
+            for bar, val in zip(bars, values_plot):
+                ax.text(
+                    bar.get_width() + max(values_plot) * 0.01,
+                    bar.get_y() + bar.get_height() / 2,
+                    value_fmt.format(val),
+                    va="center", fontsize=9,
+                )
+        else:
+            bars = ax.bar(
+                labels, values,
+                color=colors, edgecolor="white", linewidth=0.5,
+            )
+            ax.set_ylabel(ylabel)
+            plt.xticks(rotation=25, ha="right")
+            for bar, val in zip(bars, values):
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + max(values) * 0.01,
+                    value_fmt.format(val),
+                    ha="center", fontsize=9, fontweight="bold",
+                )
+
+        ax.set_title(title, fontweight="bold")
+        ax.spines[["top", "right"]].set_visible(False)
+        plt.tight_layout()
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+        log.info(f"  Chart saved: {path}")
+        return json.dumps({"status": "saved", "path": path})
+    except Exception as e:
+        log.error(f"chart_from_results failed: {e}")
+        return json.dumps({"error": str(e)})
+
+
 def generate_chart(chart_type: str, x_col: str, y_col: str, title: str = "") -> str:
     """
     Generate a chart from the active dataset.

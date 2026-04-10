@@ -199,12 +199,25 @@ def run_deterministic_pipeline(data_dir: str, output_path: str) -> bool:
         print(f"  Q4 SKIP  payment={pay_col} returned={ret_col}")
 
     # ── Charts ───────────────────────────────────────────────
-    if cat_col and rev_col:
-        generate_chart("barh", cat_col, rev_col, "Q1 Revenue by Category")
-    if reg_col and del_col:
-        generate_chart("bar", reg_col, del_col, "Q2 Delivery by Region")
-    if pay_col and ret_col:
-        generate_chart("bar", pay_col, ret_col, "Q4 Return Rate by Payment")
+    # Use chart_from_results to read from already-computed Q1-Q4 dicts.
+    # This avoids issues where the source column is non-numeric (Q4 return_status)
+    # or where generate_chart would use sum instead of mean (Q2 delivery_days).
+    from tools.reporting import chart_from_results
+    if state.get_result("q1"):
+        chart_from_results(
+            "q1", "Q1 Revenue by Category",
+            ylabel="Revenue", value_fmt="{:,.0f}", orientation="barh",
+        )
+    if state.get_result("q2"):
+        chart_from_results(
+            "q2", "Q2 Avg Delivery Days by Region",
+            ylabel="Days", value_fmt="{:.2f}", orientation="bar",
+        )
+    if state.get_result("q4"):
+        chart_from_results(
+            "q4", "Q4 Return Rate by Payment",
+            ylabel="Return Rate (%)", value_fmt="{:.2f}%", orientation="bar",
+        )
 
     # ── Compile strict Q1-Q5 submission ──────────────────────
     compile_report(output_path=output_path)
@@ -237,7 +250,21 @@ def main():
         help="Manual column overrides: role=col,role=col  e.g. "
              "'category=product_category,revenue=_revenue'"
     )
+    parser.add_argument(
+        "--model", default="",
+        help=(
+            "Gemini model override for the ADK agent pipeline. "
+            "Examples: gemini-flash-latest, gemini-2.5-flash-lite, "
+            "gemini-2.0-flash-lite, gemini-1.5-flash. "
+            "If omitted, reads GEMINI_MODEL env var, then config.GEMINI_MODEL."
+        ),
+    )
     args = parser.parse_args()
+
+    # Propagate --model to orchestrator/adk via env so the ADK web UI and
+    # the embedded agent pipeline both see the same value.
+    if args.model:
+        os.environ["GEMINI_MODEL"] = args.model
 
     # Resolve output path
     if not args.output:
@@ -286,16 +313,71 @@ def main():
                 # ADK reads GOOGLE_API_KEY from env
                 os.environ["GOOGLE_API_KEY"] = api_key
 
+                chosen_model = args.model or os.getenv(
+                    "GEMINI_MODEL", ""
+                ) or "default-from-config"
                 print("\n  STEP 2: Google ADK agent pipeline")
-                print("  6-agent squad: Data Engineer, Planner, Analyst, "
-                      "Auditor, Synthesizer, Validator")
+                print(
+                    f"  Model: {chosen_model}  "
+                    "(edit config.GEMINI_MODEL or pass --model to change)"
+                )
+                print(
+                    "  6-agent squad: Data Engineer, Planner, Analyst, "
+                    "Auditor, Synthesizer, Validator"
+                )
 
                 import asyncio
                 from orchestrator import build_squad
                 from tools.reporting import compile_report
+                from config import GEMINI_FALLBACK_MODELS
 
-                squad = build_squad(args.data, problem)
-                asyncio.run(_run_adk_pipeline(squad, args.data, problem))
+                # Build the ordered chain of models to try. The primary is
+                # whatever _resolve_model in the orchestrator would pick; the
+                # fallbacks are appended, de-duplicated, preserving order.
+                primary = args.model or os.getenv("GEMINI_MODEL", "") or ""
+                model_chain: list[str] = []
+                for m in (primary, *GEMINI_FALLBACK_MODELS):
+                    m = (m or "").strip()
+                    if m and m not in model_chain:
+                        model_chain.append(m)
+                model_chain.append("")  # final sentinel: "use config default"
+
+                last_err: Exception | None = None
+                for attempt_model in model_chain:
+                    try:
+                        if attempt_model:
+                            print(f"\n  Trying model: {attempt_model}")
+                        squad = build_squad(
+                            args.data,
+                            problem_statement=problem,
+                            model=attempt_model or None,
+                        )
+                        asyncio.run(
+                            _run_adk_pipeline(squad, args.data, problem)
+                        )
+                        last_err = None
+                        break
+                    except Exception as inner:
+                        msg = str(inner)
+                        transient = any(
+                            code in msg
+                            for code in (
+                                "503", "UNAVAILABLE",
+                                "429", "RESOURCE_EXHAUSTED",
+                                "404", "NOT_FOUND",
+                            )
+                        )
+                        last_err = inner
+                        if not transient:
+                            raise
+                        log.warning(
+                            "Model %r failed transiently (%s); "
+                            "trying next fallback",
+                            attempt_model or "<default>",
+                            msg.split("\n", 1)[0][:120],
+                        )
+                if last_err is not None:
+                    raise last_err
 
                 # Re-compile using any improved findings from the agents
                 compile_report(output_path=args.output)
